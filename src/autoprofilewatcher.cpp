@@ -26,6 +26,12 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonParseError>
+#include <QProcess>
+#include <QProcessEnvironment>
 
 #if defined(Q_OS_UNIX) && defined(WITH_X11)
     #include "x11extras.h"
@@ -34,6 +40,212 @@
     #include "winextras.h"
 
 #endif
+
+namespace
+{
+#if defined(Q_OS_LINUX)
+struct HyprlandActiveWindowInfo
+{
+    QString address;
+    QString windowClass;
+    QString windowTitle;
+    qint64 pid = -1;
+};
+
+bool isHyprlandSession()
+{
+    const QByteArray instanceSignature = qgetenv("HYPRLAND_INSTANCE_SIGNATURE");
+    if (!instanceSignature.isEmpty())
+    {
+        return true;
+    }
+
+    const QString desktop = QString::fromUtf8(qgetenv("XDG_CURRENT_DESKTOP"));
+    return desktop.contains(QStringLiteral("Hyprland"), Qt::CaseInsensitive);
+}
+
+QString hyprlandInstanceSignature(AntiMicroSettings *settings)
+{
+    static QString cachedSignature;
+    static QString cachedWaylandDisplay;
+
+    if (settings != nullptr)
+    {
+        const QString overrideSignature = settings->value("Hyprland/InstanceSignature", "").toString();
+        if (!overrideSignature.isEmpty())
+        {
+            return overrideSignature;
+        }
+    }
+
+    const QString envSignature = QString::fromUtf8(qgetenv("HYPRLAND_INSTANCE_SIGNATURE"));
+    if (!envSignature.isEmpty())
+    {
+        return envSignature;
+    }
+
+    const QString waylandDisplay = QString::fromUtf8(qgetenv("WAYLAND_DISPLAY"));
+    if (!cachedSignature.isEmpty() && cachedWaylandDisplay == waylandDisplay)
+    {
+        return cachedSignature;
+    }
+
+    QProcess process;
+    process.setProgram(QStringLiteral("hyprctl"));
+    process.setArguments(QStringList() << QStringLiteral("-j") << QStringLiteral("instances"));
+    process.start();
+    if (!process.waitForFinished(300))
+    {
+        process.kill();
+        process.waitForFinished(50);
+        return QString();
+    }
+
+    if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0)
+    {
+        return QString();
+    }
+
+    const QByteArray output = process.readAllStandardOutput();
+    QJsonParseError parseError;
+    const QJsonDocument doc = QJsonDocument::fromJson(output, &parseError);
+    if (parseError.error != QJsonParseError::NoError || !doc.isArray())
+    {
+        return QString();
+    }
+
+    QString selectedSignature;
+    const QJsonArray instances = doc.array();
+    for (const QJsonValue &value : instances)
+    {
+        if (!value.isObject())
+        {
+            continue;
+        }
+
+        const QJsonObject obj = value.toObject();
+        const QString signature = obj.value(QStringLiteral("instance")).toString();
+        const QString wlSocket = obj.value(QStringLiteral("wl_socket")).toString();
+        if (!signature.isEmpty() && !waylandDisplay.isEmpty() && wlSocket == waylandDisplay)
+        {
+            selectedSignature = signature;
+            break;
+        }
+    }
+
+    if (selectedSignature.isEmpty() && !instances.isEmpty())
+    {
+        const QJsonValue lastValue = instances.last();
+        if (lastValue.isObject())
+        {
+            selectedSignature = lastValue.toObject().value(QStringLiteral("instance")).toString();
+        }
+    }
+
+    cachedSignature = selectedSignature;
+    cachedWaylandDisplay = waylandDisplay;
+    return cachedSignature;
+}
+
+QString resolveProcExe(qint64 pid)
+{
+    if (pid <= 0)
+    {
+        return QString();
+    }
+
+    const QString procPath = QString("/proc/%1/exe").arg(pid);
+    QFileInfo procInfo(procPath);
+    if (!procInfo.exists())
+    {
+        return QString();
+    }
+
+    return procInfo.symLinkTarget();
+}
+
+bool queryHyprlandActiveWindow(AntiMicroSettings *settings, HyprlandActiveWindowInfo *info)
+{
+    if (info == nullptr)
+    {
+        return false;
+    }
+
+    QProcess process;
+    process.setProgram(QStringLiteral("hyprctl"));
+    QStringList arguments;
+    arguments << QStringLiteral("-j");
+
+    const QString signature = hyprlandInstanceSignature(settings);
+    if (!signature.isEmpty())
+    {
+        arguments << QStringLiteral("-i") << signature;
+    }
+    arguments << QStringLiteral("activewindow");
+    process.setArguments(arguments);
+
+    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    if (!signature.isEmpty())
+    {
+        env.insert(QStringLiteral("HYPRLAND_INSTANCE_SIGNATURE"), signature);
+    }
+    process.setProcessEnvironment(env);
+
+    process.start();
+    if (!process.waitForFinished(200))
+    {
+        process.kill();
+        process.waitForFinished(50);
+        qDebug() << "Hyprland active window query timed out";
+        return false;
+    }
+
+    if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0)
+    {
+        qDebug() << "Hyprland active window query failed:"
+                 << "exitStatus=" << process.exitStatus() << "exitCode=" << process.exitCode();
+        return false;
+    }
+
+    const QByteArray output = process.readAllStandardOutput();
+    if (output.trimmed().isEmpty())
+    {
+        qDebug() << "Hyprland active window query returned empty output";
+        return false;
+    }
+
+    QJsonParseError parseError;
+    const QJsonDocument doc = QJsonDocument::fromJson(output, &parseError);
+    if (parseError.error != QJsonParseError::NoError || !doc.isObject())
+    {
+        qDebug() << "Hyprland active window query returned invalid JSON:" << parseError.errorString();
+        return false;
+    }
+
+    const QJsonObject obj = doc.object();
+    info->address = obj.value(QStringLiteral("address")).toString();
+    info->windowClass = obj.value(QStringLiteral("class")).toString();
+    if (info->windowClass.isEmpty())
+    {
+        info->windowClass = obj.value(QStringLiteral("initialClass")).toString();
+    }
+    info->windowTitle = obj.value(QStringLiteral("title")).toString();
+    if (info->windowTitle.isEmpty())
+    {
+        info->windowTitle = obj.value(QStringLiteral("initialTitle")).toString();
+    }
+    info->pid = static_cast<qint64>(obj.value(QStringLiteral("pid")).toDouble(-1));
+
+    if (info->address.isEmpty() && info->windowClass.isEmpty() && info->windowTitle.isEmpty() && info->pid <= 0)
+    {
+        qDebug() << "Hyprland active window query returned no focused window";
+        return false;
+    }
+
+    return true;
+}
+#endif
+} // namespace
 
 AutoProfileWatcher *AutoProfileWatcher::_instance = nullptr;
 QTimer AutoProfileWatcher::checkWindowTimer;
@@ -81,22 +293,63 @@ void AutoProfileWatcher::runAppCheck()
     QString appLocation = QString();
     QString baseAppFileName = QString();
     getUniqeIDSetLocal().clear();
+    QString nowWindow = QString();
+    QString nowWindowClass = QString();
+    QString nowWindowName = QString();
+#if defined(Q_OS_LINUX)
+    qint64 nowWindowPid = -1;
+    const bool wantAppLocation = !appProfileAssignments.isEmpty();
+    bool hyprlandActiveWindow = false;
+#endif
 
     // Check whether program path needs to be parsed. Removes processing time
     // and need to run Linux specific code searching /proc.
 #ifdef Q_OS_LINUX
-    if (!appProfileAssignments.isEmpty())
+    #if defined(WITH_X11)
+    if (QApplication::platformName() == QStringLiteral("xcb"))
     {
-        appLocation = findAppLocation();
+        if (wantAppLocation)
+        {
+            appLocation = findAppLocation();
+        }
+    } else
+    #endif
+    {
+        if (isHyprlandSession())
+        {
+            HyprlandActiveWindowInfo hyprInfo;
+            if (queryHyprlandActiveWindow(settings, &hyprInfo))
+            {
+                hyprlandActiveWindow = true;
+                if (!hyprInfo.address.isEmpty())
+                {
+                    nowWindow = hyprInfo.address;
+                } else if (hyprInfo.pid > 0)
+                {
+                    nowWindow = QString::number(hyprInfo.pid);
+                } else
+                {
+                    nowWindow = hyprInfo.windowClass;
+                }
+                nowWindowClass = hyprInfo.windowClass;
+                nowWindowName = hyprInfo.windowTitle;
+                nowWindowPid = hyprInfo.pid;
+
+                if (wantAppLocation && nowWindowPid > 0)
+                {
+                    appLocation = resolveProcExe(nowWindowPid);
+                }
+            }
+        }
     }
 #else
     // In Windows, get program location no matter what.
     appLocation = findAppLocation();
+#endif
     if (!appLocation.isEmpty())
     {
         baseAppFileName = QFileInfo(appLocation).fileName();
     }
-#endif
 
     qDebug() << "appLocation is " << appLocation;
 
@@ -105,34 +358,44 @@ void AutoProfileWatcher::runAppCheck()
     QWidget *focusedWidget = qApp->activeWindow();
     if (focusedWidget != nullptr)
         qDebug() << "get active window of app";
-    QString nowWindow = QString();
-    QString nowWindowClass = QString();
-    QString nowWindowName = QString();
 #ifdef Q_OS_WIN
     nowWindowName = WinExtras::getCurrentWindowText();
 #else
-    long currentWindow = X11Extras::getInstance()->getWindowInFocus();
-    qDebug() << "getWindowInFocus: " << currentWindow;
-
-    if (currentWindow > 0)
+    #if defined(WITH_X11)
+    if (QApplication::platformName() == QStringLiteral("xcb"))
     {
-        long tempWindow = X11Extras::getInstance()->findParentClient(currentWindow);
-        qDebug() << "findParentClient: " << tempWindow;
+        long currentWindow = X11Extras::getInstance()->getWindowInFocus();
+        qDebug() << "getWindowInFocus: " << currentWindow;
 
-        if (tempWindow > 0)
-            currentWindow = tempWindow;
+        if (currentWindow > 0)
+        {
+            long tempWindow = X11Extras::getInstance()->findParentClient(currentWindow);
+            qDebug() << "findParentClient: " << tempWindow;
 
-        nowWindow = QString::number(currentWindow);
-        qDebug() << "number of window now: " << nowWindow;
+            if (tempWindow > 0)
+                currentWindow = tempWindow;
 
-        nowWindowClass = X11Extras::getInstance()->getWindowClass(static_cast<Window>(currentWindow));
-        qDebug() << "class of window now: " << nowWindowClass;
+            nowWindow = QString::number(currentWindow);
+            qDebug() << "number of window now: " << nowWindow;
 
-        nowWindowName = X11Extras::getInstance()->getWindowTitle(static_cast<Window>(currentWindow));
-        qDebug() << "title of window now: " << nowWindowName;
+            nowWindowClass = X11Extras::getInstance()->getWindowClass(static_cast<Window>(currentWindow));
+            qDebug() << "class of window now: " << nowWindowClass;
+
+            nowWindowName = X11Extras::getInstance()->getWindowTitle(static_cast<Window>(currentWindow));
+            qDebug() << "title of window now: " << nowWindowName;
+        }
+        qDebug() << "WINDOW CLASS: " << nowWindowClass;
+        qDebug() << "WINDOW IN FOCUS: " << nowWindow;
+    } else
+    #endif
+    #if defined(Q_OS_LINUX)
+    if (hyprlandActiveWindow)
+    {
+        qDebug() << "Hyprland active window:"
+                 << "class=" << nowWindowClass << "title=" << nowWindowName << "pid=" << nowWindowPid
+                 << "exe=" << appLocation;
     }
-    qDebug() << "WINDOW CLASS: " << nowWindowClass;
-    qDebug() << "WINDOW IN FOCUS: " << nowWindow;
+    #endif
 #endif
     qDebug() << "WINDOW NAME: " << nowWindowName;
 

@@ -45,7 +45,7 @@
 #include "xml/inputdevicexml.h"
 #include "xml/joybuttonslotxml.h"
 
-#if defined(WITH_X11) || defined(Q_OS_WIN)
+#if defined(Q_OS_WIN) || defined(Q_OS_LINUX)
     #include "autoprofileinfo.h"
     #include "autoprofilewatcher.h"
 #endif
@@ -78,6 +78,42 @@
 
 #include <SDL2/SDL_joystick.h>
 
+namespace
+{
+bool isHyprlandSession()
+{
+#if defined(Q_OS_LINUX)
+    const QByteArray instanceSignature = qgetenv("HYPRLAND_INSTANCE_SIGNATURE");
+    if (!instanceSignature.isEmpty())
+    {
+        return true;
+    }
+
+    const QString desktop = QString::fromUtf8(qgetenv("XDG_CURRENT_DESKTOP"));
+    return desktop.contains(QStringLiteral("Hyprland"), Qt::CaseInsensitive);
+#else
+    return false;
+#endif
+}
+
+bool canUseAutoProfiles()
+{
+#if defined(Q_OS_WIN)
+    return true;
+#elif defined(Q_OS_LINUX)
+    #if defined(WITH_X11)
+    if (QApplication::platformName() == QStringLiteral("xcb"))
+    {
+        return true;
+    }
+    #endif
+    return isHyprlandSession();
+#else
+    return false;
+#endif
+}
+} // namespace
+
 #ifdef Q_OS_WIN
     #include "winextras.h"
     #include <QSysInfo>
@@ -105,8 +141,8 @@ MainWindow::MainWindow(QMap<SDL_JoystickID, InputDevice *> *joysticks, CommandLi
 
     ui->actionStick_Pad_Assign->setVisible(false);
 
-#if defined(WITH_X11)
-    if (QApplication::platformName() == QStringLiteral("xcb"))
+#if defined(Q_OS_WIN) || defined(Q_OS_LINUX)
+    if (canUseAutoProfiles())
     {
         this->appWatcher = new AutoProfileWatcher(settings, this);
         checkAutoProfileWatcherTimer();
@@ -115,11 +151,8 @@ MainWindow::MainWindow(QMap<SDL_JoystickID, InputDevice *> *joysticks, CommandLi
         this->appWatcher = nullptr;
         qDebug() << "appWatcher instance set to null pointer";
     }
-#elif defined(Q_OS_WIN)
-    this->appWatcher = new AutoProfileWatcher(settings, this);
-    checkAutoProfileWatcherTimer();
 #else
-    this->appWatcher = 0;
+    this->appWatcher = nullptr;
 #endif
 
     signalDisconnect = false;
@@ -177,13 +210,11 @@ MainWindow::MainWindow(QMap<SDL_JoystickID, InputDevice *> *joysticks, CommandLi
     connect(ui->actionWiki, &QAction::triggered, this, &MainWindow::openWikiPage);
     connect(ui->actionCalibration, &QAction::triggered, this, &MainWindow::openCalibration);
 
-#if defined(WITH_X11)
-    if (QApplication::platformName() == QStringLiteral("xcb"))
+#if defined(Q_OS_WIN) || defined(Q_OS_LINUX)
+    if (appWatcher != nullptr)
     {
         connect(appWatcher, &AutoProfileWatcher::foundApplicableProfile, this, &MainWindow::autoprofileLoad);
     }
-#elif defined(Q_OS_WIN)
-    connect(appWatcher, &AutoProfileWatcher::foundApplicableProfile, this, &MainWindow::autoprofileLoad);
 #endif
 
 #ifdef Q_OS_WIN
@@ -1548,11 +1579,9 @@ void MainWindow::autoprofileLoad(AutoProfileInfo *info)
     {
         qCritical() << QString("Auto-switching to nullptr profile!");
     }
-#if defined(WITH_X11) || defined(Q_OS_WIN)
-    #if defined(WITH_X11)
-    if (QApplication::platformName() != QStringLiteral("xcb"))
+#if defined(Q_OS_WIN) || defined(Q_OS_LINUX)
+    if (!canUseAutoProfiles() || appWatcher == nullptr)
         return;
-    #endif
 
     for (int i = 0; i < ui->tabWidget->count(); i++)
     {
@@ -1645,11 +1674,11 @@ void MainWindow::autoprofileLoad(AutoProfileInfo *info)
 
 void MainWindow::checkAutoProfileWatcherTimer()
 {
-#if defined(WITH_X11) || defined(Q_OS_WIN)
-    #if defined(WITH_X11)
-    if (QApplication::platformName() != QStringLiteral("xcb"))
+#if defined(Q_OS_WIN) || defined(Q_OS_LINUX)
+    if (!canUseAutoProfiles() || appWatcher == nullptr)
+    {
         return;
-    #endif
+    }
 
     QString autoProfileActive = m_settings->value("AutoProfiles/AutoProfilesActive", "0").toString();
     if (autoProfileActive == "1")

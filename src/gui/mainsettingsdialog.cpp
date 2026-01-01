@@ -59,6 +59,25 @@ static const QString RUNATSTARTUPREGKEY("HKEY_CURRENT_USER\\Software\\Microsoft\
 static const QString RUNATSTARTUPLOCATION(QString("%0\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\antimicrox.lnk")
                                               .arg(QString::fromUtf8(qgetenv("AppData"))));
 
+namespace
+{
+bool isHyprlandSession()
+{
+#if defined(Q_OS_LINUX)
+    const QByteArray instanceSignature = qgetenv("HYPRLAND_INSTANCE_SIGNATURE");
+    if (!instanceSignature.isEmpty())
+    {
+        return true;
+    }
+
+    const QString desktop = QString::fromUtf8(qgetenv("XDG_CURRENT_DESKTOP"));
+    return desktop.contains(QStringLiteral("Hyprland"), Qt::CaseInsensitive);
+#else
+    return false;
+#endif
+}
+} // namespace
+
 MainSettingsDialog::MainSettingsDialog(AntiMicroSettings *settings, QList<InputDevice *> *devices, QWidget *parent)
     : QDialog(parent, Qt::Dialog)
     , ui(new Ui::MainSettingsDialog)
@@ -106,8 +125,20 @@ MainSettingsDialog::MainSettingsDialog(AntiMicroSettings *settings, QList<InputD
 #endif
     ui->autoProfileTableWidget->hideColumn(7);
 
-#if defined(WITH_X11)
+#if defined(Q_OS_LINUX)
+    bool allowAutoProfiles = false;
+    #if defined(WITH_X11)
     if (QApplication::platformName() == QStringLiteral("xcb"))
+    {
+        allowAutoProfiles = true;
+    }
+    #endif
+    if (!allowAutoProfiles && isHyprlandSession())
+    {
+        allowAutoProfiles = true;
+    }
+
+    if (allowAutoProfiles)
     {
         populateAutoProfiles();
         fillAllAutoProfilesTable();
@@ -121,13 +152,13 @@ MainSettingsDialog::MainSettingsDialog(AntiMicroSettings *settings, QList<InputD
         auto item = ui->categoriesListWidget->item(ui->categoriesListWidget->count() - 1);
         item->setFlags(item->flags() & ~Qt::ItemIsEnabled);
     }
-#elif !defined(WITH_X11) && defined(Q_OS_UNIX)
-    delete ui->categoriesListWidget->item(3);
-    ui->stackedWidget->removeWidget(ui->autoProfileSettingsPage);
 #elif defined(Q_OS_WIN)
     populateAutoProfiles();
     fillAllAutoProfilesTable();
     fillGUIDComboBox();
+#elif defined(Q_OS_UNIX)
+    delete ui->categoriesListWidget->item(3);
+    ui->stackedWidget->removeWidget(ui->autoProfileSettingsPage);
 #endif
 
     QString autoProfileActive = settings->value("AutoProfiles/AutoProfilesActive", "").toString();
