@@ -101,7 +101,9 @@ QString EventHandlerFactory::fallBackIdentifier()
     static bool identifier_obtained = false;
     if (identifier_obtained)
         return temp;
-    QString detected_xdg_session = qgetenv("XDG_SESSION_TYPE");
+    const QString detected_xdg_session = qgetenv("XDG_SESSION_TYPE");
+    const bool is_wayland_session = (detected_xdg_session == "wayland") || !qgetenv("WAYLAND_DISPLAY").isEmpty() ||
+                                    !qgetenv("HYPRLAND_INSTANCE_SIGNATURE").isEmpty();
 
     bool compiled_with_x11 = false;
     bool compiled_with_uinput = false;
@@ -112,7 +114,7 @@ QString EventHandlerFactory::fallBackIdentifier()
     compiled_with_uinput = true;
     #endif
 
-    if (detected_xdg_session == "wayland")
+    if (is_wayland_session)
     {
         if (compiled_with_uinput)
         {
