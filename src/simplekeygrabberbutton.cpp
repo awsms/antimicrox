@@ -81,7 +81,7 @@ bool SimpleKeyGrabberButton::eventFilter(QObject *obj, QEvent *event)
     } else if (grabNextAction && (event->type() == QEvent::KeyRelease))
     {
         QKeyEvent *keyEve = static_cast<QKeyEvent *>(event);
-        int tempcode = keyEve->nativeScanCode();
+        int tempcode = normalizeNativeScanCode(keyEve->nativeScanCode());
         int virtualactual = keyEve->nativeVirtualKey();
 
         BaseEventHandler *handler = EventHandlerFactory::getInstance()->handler();
@@ -99,27 +99,46 @@ bool SimpleKeyGrabberButton::eventFilter(QObject *obj, QEvent *event)
         }
 #elif defined(WITH_X11)
 
-        finalvirtual = X11KeyCodeToX11KeySym(tempcode); // Obtain group 1 X11 keysym. Removes effects from modifiers.
+        if (QApplication::platformName() == QStringLiteral("xcb"))
+        {
+            finalvirtual = X11KeyCodeToX11KeySym(tempcode); // Obtain group 1 X11 keysym. Removes effects from modifiers.
 
     #ifdef WITH_UINPUT
-        if (handler->getIdentifier() == "uinput")
-        {
-            QtKeyMapperBase *x11KeyMapper =
-                AntKeyMapper::getInstance()->getNativeKeyMapper(); // Find Qt Key corresponding to X11 KeySym.
-            checkalias = x11KeyMapper->returnQtKey(finalvirtual);
-            finalvirtual = AntKeyMapper::getInstance()->returnVirtualKey(
-                checkalias); // Find corresponding Linux input key for the Qt key.
-        } else
+            if (handler->getIdentifier() == "uinput")
+            {
+                QtKeyMapperBase *x11KeyMapper =
+                    AntKeyMapper::getInstance()->getNativeKeyMapper(); // Find Qt Key corresponding to X11 KeySym.
+                checkalias = x11KeyMapper->returnQtKey(finalvirtual);
+                finalvirtual = AntKeyMapper::getInstance()->returnVirtualKey(
+                    checkalias); // Find corresponding Linux input key for the Qt key.
+            } else
     #endif
 
     #ifdef WITH_XTEST
-            if (handler->getIdentifier() == "xtest")
-            checkalias = AntKeyMapper::getInstance()->returnQtKey(finalvirtual); // Check for alias against group 1 keysym.
-        else
+                if (handler->getIdentifier() == "xtest")
+                checkalias = AntKeyMapper::getInstance()->returnQtKey(finalvirtual); // Check for alias against group 1 keysym.
+            else
     #endif
-        { // Not using any known handler.
-            finalvirtual = tempcode;
-            checkalias = AntKeyMapper::getInstance()->returnQtKey(finalvirtual);
+            { // Not using any known handler.
+                finalvirtual = tempcode;
+                checkalias = AntKeyMapper::getInstance()->returnQtKey(finalvirtual);
+            }
+        } else
+        {
+            if (handler->getIdentifier() == "uinput")
+            {
+                // Wayland: prefer native scan code (layout applied by compositor); fall back to Qt key.
+                finalvirtual = tempcode;
+                if (finalvirtual <= 0)
+                {
+                    finalvirtual = AntKeyMapper::getInstance()->returnVirtualKey(keyEve->key());
+                }
+                checkalias = AntKeyMapper::getInstance()->returnQtKey(finalvirtual);
+            } else
+            {
+                finalvirtual = tempcode;
+                checkalias = AntKeyMapper::getInstance()->returnQtKey(finalvirtual);
+            }
         }
 #else
         if (QApplication::platformName() == QStringLiteral("xcb"))

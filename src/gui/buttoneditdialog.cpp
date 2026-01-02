@@ -188,7 +188,7 @@ void ButtonEditDialog::keyReleaseEvent(QKeyEvent *event)
         QDialog::keyReleaseEvent(event);
     } else if (ui->virtualKeyMouseTabWidget->isKeyboardTabVisible())
     {
-        int controlcode = event->nativeScanCode();
+        int controlcode = normalizeNativeScanCode(event->nativeScanCode());
         int virtualactual = event->nativeVirtualKey();
 
         BaseEventHandler *handler = EventHandlerFactory::getInstance()->handler();
@@ -258,9 +258,20 @@ void ButtonEditDialog::keyReleaseEvent(QKeyEvent *event)
         #endif
         } else
         {
-            // Not running on xcb platform.
-            finalvirtual = controlcode;
-            checkalias = AntKeyMapper::getInstance()->returnQtKey(finalvirtual);
+            if (handler->getIdentifier() == "uinput")
+            {
+                // Wayland: prefer native scan code (layout applied by compositor); fall back to Qt key.
+                finalvirtual = controlcode;
+                if (finalvirtual <= 0)
+                {
+                    finalvirtual = AntKeyMapper::getInstance()->returnVirtualKey(event->key());
+                }
+                checkalias = AntKeyMapper::getInstance()->returnQtKey(finalvirtual);
+            } else
+            {
+                finalvirtual = controlcode;
+                checkalias = AntKeyMapper::getInstance()->returnQtKey(finalvirtual);
+            }
         }
 
     #else

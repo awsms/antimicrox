@@ -789,6 +789,19 @@ QString keysymToKeyString(int keysym, int alias)
     return newkey;
 }
 
+int normalizeNativeScanCode(int nativeScanCode)
+{
+#if defined(Q_OS_LINUX)
+    if (QApplication::platformName() != QStringLiteral("xcb"))
+    {
+        // Wayland provides XKB keycodes (evdev + 8); uinput expects evdev codes.
+        if (nativeScanCode >= 8)
+            return nativeScanCode - 8;
+    }
+#endif
+    return nativeScanCode;
+}
+
 void sendKeybEvent(JoyButtonSlot *slot, bool pressed)
 {
     EventHandlerFactory::getInstance()->handler()->sendKeyboardEvent(slot, pressed);

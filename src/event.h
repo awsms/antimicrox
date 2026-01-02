@@ -34,5 +34,6 @@ int X11KeySymToKeycode(QString key);
 QString keycodeToKeyString(int keycode, int alias = 0);
 int X11KeyCodeToX11KeySym(int keycode);
 QString keysymToKeyString(int keysym, int alias = 0);
+int normalizeNativeScanCode(int nativeScanCode);
 
 #endif // EVENT_H

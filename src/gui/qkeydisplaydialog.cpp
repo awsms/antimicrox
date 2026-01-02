@@ -20,6 +20,7 @@
 #include "ui_qkeydisplaydialog.h"
 
 #include "antkeymapper.h"
+#include "event.h"
 #include "eventhandlerfactory.h"
 
 #include <QApplication>
@@ -66,7 +67,7 @@ void QKeyDisplayDialog::keyPressEvent(QKeyEvent *event)
 
 void QKeyDisplayDialog::keyReleaseEvent(QKeyEvent *event)
 {
-    int scancode = event->nativeScanCode();
+    int scancode = normalizeNativeScanCode(event->nativeScanCode());
     int virtualkey = event->nativeVirtualKey();
 
     int finalvirtual = 0;
@@ -92,7 +93,18 @@ void QKeyDisplayDialog::keyReleaseEvent(QKeyEvent *event)
     #endif
     } else
     {
-        finalvirtual = scancode;
+        BaseEventHandler *handler = EventHandlerFactory::getInstance()->handler();
+        if (handler->getIdentifier() == "uinput")
+        {
+            finalvirtual = scancode;
+            if (finalvirtual <= 0)
+            {
+                finalvirtual = AntKeyMapper::getInstance()->returnVirtualKey(event->key());
+            }
+        } else
+        {
+            finalvirtual = scancode;
+        }
     }
 
 #else
